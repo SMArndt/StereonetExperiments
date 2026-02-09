@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 from io import StringIO
 
+import base64
 import dash
 from dash import dcc, html, Input, Output, State, no_update
 import plotly.graph_objects as go
@@ -19,6 +20,11 @@ FIG_WIDTH = int(
     ((FIG_HEIGHT - (PLOT_MARGIN["t"] + PLOT_MARGIN["b"])) * 2) / (1 - H_SPACING)
     + (PLOT_MARGIN["l"] + PLOT_MARGIN["r"])
 )
+NET_WIDTH = FIG_WIDTH - (PLOT_MARGIN["l"] + PLOT_MARGIN["r"])
+PANEL_WIDTH = int(NET_WIDTH * (1 - H_SPACING) / 2)
+LEGEND_COLS = 4
+LEGEND_ENTRY_WIDTH = 1 / LEGEND_COLS
+LEGEND_ENTRY_WIDTH_MODE = 'fraction'
 
 # -------------------------
 # Helper geometry functions
@@ -426,7 +432,6 @@ def compute_alignment_context(df, right_prefix):
 # -------------------------
 # Data load
 # -------------------------
-CSV_PATH = r"C:\Projects\AMIRA\Mungari\Seismic\20250702\Mungari20250709_SMTI_step55.csv"
 
 LEFT_COLS = {
     "p_trend": "P-Axis Trend (°)",
@@ -471,30 +476,22 @@ def available_right_modes(df):
             modes.append(prefix)
     return modes
 
-def load_dataset(path):
-    df = pd.read_csv(path)
+def validate_dataset(df):
     require_columns(df, list(LEFT_COLS.values()))
     if not available_right_modes(df):
         raise ValueError("Missing right-side columns (expected EDipDir*/EDip* or SDipDir*/SDip*)")
     return df
 
-try:
-    _initial_df = load_dataset(CSV_PATH)
-    _initial_modes = available_right_modes(_initial_df)
-    DEFAULT_RIGHT_MODE = _initial_modes[0] if _initial_modes else "E"
-    BASE_ALIGN_CTX = compute_alignment_context(_initial_df, DEFAULT_RIGHT_MODE)
-    RIGHT_MODE_OPTIONS = [{"label": m, "value": m} for m in _initial_modes]
-except Exception:
-    DEFAULT_RIGHT_MODE = "E"
-    RIGHT_MODE_OPTIONS = [{"label": "E", "value": "E"}]
-    BASE_ALIGN_CTX = {
-        "trend": 0.0,
-        "plunge": 0.0,
-        "equator": [1.0, 0.0, 0.0],
-        "twist": 0.0,
-        "angle_rad": 0.0,
-        "angle_deg": 0.0,
-    }
+DEFAULT_RIGHT_MODE = None
+RIGHT_MODE_OPTIONS = []
+BASE_ALIGN_CTX = {
+    "trend": 0.0,
+    "plunge": 0.0,
+    "equator": [1.0, 0.0, 0.0],
+    "twist": 0.0,
+    "angle_rad": 0.0,
+    "angle_deg": 0.0,
+}
 
 # -------------------------
 # Dash App
@@ -507,22 +504,25 @@ def make_title(path):
     return f"SMTI stereonet comparison — {name}" if name else "SMTI stereonet comparison"
 
 app.layout = html.Div([
-    html.H3(make_title(CSV_PATH), id='page_title'),
+    html.H3(make_title(None), id='page_title'),
     html.Div([
-        html.Label("CSV path"),
-        dcc.Input(id='file_path', type='text', value=CSV_PATH, style={'width':'80%'}),
-        html.Button('Load CSV', id='load_button', n_clicks=0, style={'marginLeft':'8px'}),
+        dcc.Upload(
+            id='upload_csv',
+            children=html.Button('Browse…'),
+            accept='.csv',
+        ),
         html.Div(id='load_status', style={'marginTop':'6px', 'fontSize':'12px'}),
     ], style={'padding':'10px'}),
     html.Div([
-        html.Div(style={'width':'50%'}),
+        html.Div(style={'width': f'{PANEL_WIDTH}px'}),
         html.Div([
             html.Label("Right Dataset"),
             dcc.Dropdown(
                 id='right_mode',
                 options=RIGHT_MODE_OPTIONS,
                 value=DEFAULT_RIGHT_MODE,
-                clearable=False,
+                clearable=True,
+                placeholder="Upload a CSV to detect E/S",
             ),
             html.Label("Right Δ Trend (°)"),
             dcc.Slider(
@@ -546,8 +546,8 @@ app.layout = html.Div([
                 html.Button('No Rotation', id='btn_no_rotation', n_clicks=0),
                 html.Button('Best Fit', id='btn_best_fit', n_clicks=0, style={'marginLeft':'8px'}),
             ], style={'marginTop':'10px'}),
-        ], style={'width':'50%', 'padding':'10px'}),
-    ], style={'display':'flex'}),
+        ], style={'width': f'{PANEL_WIDTH}px', 'padding':'10px'}),
+    ], style={'display':'flex', 'width': f'{FIG_WIDTH}px'}),
     dcc.Store(id='data_store'),
     dcc.Store(id='right_align_base', data={
         "trend": BASE_ALIGN_CTX["trend"],
@@ -576,27 +576,34 @@ app.layout = html.Div([
     Output('right_mode', 'options'),
     Output('right_mode', 'value'),
     Output('page_title', 'children'),
-    Input('load_button', 'n_clicks'),
-    State('file_path', 'value'),
+    Input('upload_csv', 'contents'),
+    State('upload_csv', 'filename'),
     prevent_initial_call=True,
 )
-def load_data(n_clicks, file_path):
+def load_data(upload_contents, upload_filename):
     try:
-        df = load_dataset(file_path)
+        if not upload_contents:
+            return no_update, "No file selected.", no_update, no_update, no_update, no_update, no_update, no_update
+        header, b64 = upload_contents.split(',', 1)
+        decoded = base64.b64decode(b64)
+        df = pd.read_csv(StringIO(decoded.decode('utf-8', errors='replace')))
+        df = validate_dataset(df)
+        source_label = upload_filename or "uploaded file"
+        title = make_title(upload_filename or "")
     except Exception as exc:
         return no_update, f"Load failed: {exc}", no_update, no_update, no_update, no_update, no_update, no_update
     modes = available_right_modes(df)
-    right_mode = modes[0] if modes else DEFAULT_RIGHT_MODE
-    ctx = compute_alignment_context(df, right_mode)
+    right_mode = modes[0] if modes else None
+    ctx = compute_alignment_context(df, right_mode) if right_mode else BASE_ALIGN_CTX
     return (
         df.to_json(date_format='iso', orient='split'),
-        f"Loaded {file_path} ({len(df)} rows)",
+        f"Loaded {source_label} ({len(df)} rows)",
         ctx["trend"],
         ctx["angle_deg"],
         ctx,
         [{"label": m, "value": m} for m in modes],
         right_mode,
-        make_title(file_path),
+        title,
     )
 
 @app.callback(
@@ -635,7 +642,7 @@ def on_right_mode_change(right_mode, data_store):
         if data_store:
             df = pd.read_json(StringIO(data_store), orient='split')
         else:
-            df = load_dataset(CSV_PATH)
+            return no_update, no_update, no_update
     except Exception:
         return no_update, no_update, no_update
     ctx = compute_alignment_context(df, right_mode)
@@ -654,7 +661,9 @@ def update_figure(right_trend_delta, right_plunge_delta, right_align_base, right
         if data_store:
             df = pd.read_json(StringIO(data_store), orient='split')
         else:
-            df = load_dataset(CSV_PATH)
+            fig = go.Figure()
+            fig.update_layout(title="Upload a CSV to begin")
+            return fig
     except Exception as exc:
         fig = go.Figure()
         fig.update_layout(title=f"Data load error: {exc}")
@@ -820,15 +829,9 @@ def update_figure(right_trend_delta, right_plunge_delta, right_align_base, right
     grid_rot_left = rotation_from_pole_equator(p_avg, t_avg) if (p_avg is not None and t_avg is not None) else None
     grid_rot_right = rotation_from_pole_equator(e_avg_rot[0], e_avg_rot[1]) if (e_avg_rot[0] is not None and e_avg_rot[1] is not None) else None
 
-    # Add grid lines (rotated Schmidt net)
-    grid_radii = np.linspace(0.2, 1.0, 5)
-    grid_angles = np.linspace(0, 360, 12, endpoint=False)
-    plunge_circles = []
-    for r in grid_radii:
-        p = radius_to_plunge(r)
-        plunge_circles.append(p)
-        if p > 1e-6:
-            plunge_circles.append(-p)
+    # Add grid lines (rotated Schmidt net) every 10°
+    grid_angles = np.arange(0, 360, 10)
+    plunge_circles = list(range(-80, 81, 10))
 
     grid_color = '#b8b8b8'
     equator_color = '#9a9a9a'
@@ -870,24 +873,27 @@ def update_figure(right_trend_delta, right_plunge_delta, right_align_base, right
     # Left: P/T/B axes
     fig.add_trace(go.Scatter(x=circle_x, y=circle_y, mode='lines', line=dict(color='black'), showlegend=False), row=1, col=1)
     fig.add_trace(go.Scatter(x=x_p, y=y_p, mode='markers', marker=dict(size=6, color='#1f77b4', opacity=0.7),
-                             name='P-Axis', legendgroup='PBT', legendgrouptitle_text='PBT'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=x_t, y=y_t, mode='markers', marker=dict(size=6, color='#ff7f0e', opacity=0.7),
-                             name='T-Axis', legendgroup='PBT'), row=1, col=1)
+                             name='P-Axis', legendrank=10), row=1, col=1)
     fig.add_trace(go.Scatter(x=x_b, y=y_b, mode='markers', marker=dict(size=6, color='#2ca02c', opacity=0.7),
-                             name='B-Axis', legendgroup='PBT'), row=1, col=1)
+                             name='B-Axis', legendrank=50), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x_t, y=y_t, mode='markers', marker=dict(size=6, color='#ff7f0e', opacity=0.7),
+                             name='T-Axis', legendrank=90), row=1, col=1)
 
     right_label = right_mode or DEFAULT_RIGHT_MODE
     # Right: EDip/SDip points
     fig.add_trace(go.Scatter(x=circle_x, y=circle_y, mode='lines', line=dict(color='black'), showlegend=False), row=1, col=2)
-    colors = ['#9467bd', '#8c564b', '#e377c2']
+    colors = ['#8ab7e0', '#f6c56f', '#7fd39a']
     for idx, (dipdir_col, dip_col, _, _, _, x, y) in enumerate(right_sets, start=1):
         label = f"{right_label}{idx}"
+        rank = {1: 30, 2: 70, 3: 110}.get(idx, 200 + idx)
         fig.add_trace(go.Scatter(x=x, y=y, mode='markers',
                                  marker=dict(size=6, color=colors[idx-1], opacity=0.7),
-                                 name=label, legendgroup='E', legendgrouptitle_text=right_label), row=1, col=2)
+                                 name=label,
+                                 legendrank=rank), row=1, col=2)
 
     # Average markers (orthonormal triads)
-    avg_marker_size = 21
+    avg_marker_size = 17
+    avg_marker_line = dict(color='black', width=1)
     if p_avg is not None and t_avg is not None and b_avg is not None:
         p_tr, p_pl = vector_to_trend_plunge(*p_avg)
         t_tr, t_pl = vector_to_trend_plunge(*t_avg)
@@ -896,22 +902,24 @@ def update_figure(right_trend_delta, right_plunge_delta, right_align_base, right
         xt, yt = equal_area_proj(t_tr, t_pl, rotation_deg=rotation)
         xb, yb = equal_area_proj(b_tr, b_pl, rotation_deg=rotation)
         fig.add_trace(go.Scatter(x=[xp], y=[yp], mode='markers',
-                                 marker=dict(size=avg_marker_size, color='#1f77b4', symbol='star'),
-                                 name='P-Axis Avg', legendgroup='PBT'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=[xt], y=[yt], mode='markers',
-                                 marker=dict(size=avg_marker_size, color='#ff7f0e', symbol='star'),
-                                 name='T-Axis Avg', legendgroup='PBT'), row=1, col=1)
+                                 marker=dict(size=avg_marker_size, color='#1f77b4', symbol='circle', line=avg_marker_line),
+                                 name='P-Axis Avg', legendrank=20), row=1, col=1)
         fig.add_trace(go.Scatter(x=[xb], y=[yb], mode='markers',
-                                 marker=dict(size=avg_marker_size, color='#2ca02c', symbol='star'),
-                                 name='B-Axis Avg', legendgroup='PBT'), row=1, col=1)
+                                 marker=dict(size=avg_marker_size, color='#2ca02c', symbol='circle', line=avg_marker_line),
+                                 name='B-Axis Avg', legendrank=60), row=1, col=1)
+        fig.add_trace(go.Scatter(x=[xt], y=[yt], mode='markers',
+                                 marker=dict(size=avg_marker_size, color='#ff7f0e', symbol='circle', line=avg_marker_line),
+                                 name='T-Axis Avg', legendrank=100), row=1, col=1)
 
     if all(v is not None for v in e_avg_rot):
         for idx, v in enumerate(e_avg_rot, start=1):
             tr, pl = vector_to_trend_plunge(*v)
             x, y = equal_area_proj(tr, pl, rotation_deg=rotation)
+            rank = {1: 40, 2: 80, 3: 120}.get(idx, 240 + idx)
             fig.add_trace(go.Scatter(x=[x], y=[y], mode='markers',
-                                     marker=dict(size=avg_marker_size, color=colors[idx-1], symbol='star'),
-                                     name=f"{right_label}{idx} Avg", legendgroup='E'), row=1, col=2)
+                                     marker=dict(size=avg_marker_size, color=colors[idx-1], symbol='circle', line=avg_marker_line),
+                                     name=f"{right_label}{idx} Avg",
+                                     legendrank=rank), row=1, col=2)
 
     # layout cosmetics
     fig.update_xaxes(range=[-1.05,1.05], zeroline=False, showticklabels=False, row=1, col=1, constrain='domain')
@@ -925,7 +933,17 @@ def update_figure(right_trend_delta, right_plunge_delta, right_align_base, right
         width=FIG_WIDTH,
         margin=PLOT_MARGIN,
         showlegend=True,
-        legend=dict(orientation='h', yanchor='top', y=-0.08, xanchor='center', x=0.5)
+        legend=dict(
+            title=dict(text='Legend', side='top'),
+            orientation='h',
+            yanchor='top',
+            y=-0.12,
+            xanchor='left',
+            x=0,
+            entrywidth=LEGEND_ENTRY_WIDTH,
+            entrywidthmode=LEGEND_ENTRY_WIDTH_MODE,
+            traceorder='normal'
+        )
     )
 
     return fig
