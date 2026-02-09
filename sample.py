@@ -1,8 +1,6 @@
 # stereonet_dash.py
 import numpy as np
 import pandas as pd
-from math import sqrt
-from datetime import datetime, timedelta
 
 import dash
 from dash import dcc, html, Input, Output
@@ -75,26 +73,94 @@ def dipdir_array_to_xy(dip_dirs, dips, rotation_deg=0.0):
     x, y = equal_area_proj(trend, plunge, rotation_deg)
     return x, y
 
-# -------------------------
-# Example data (replace with your load)
-# -------------------------
-def make_sample_dataset(n=500, start_date=None, seed=None, color=None):
-    rng = np.random.default_rng(seed)
-    if start_date is None:
-        start_date = datetime(2020,1,1)
-    dates = [start_date + timedelta(days=int(x)) for x in rng.integers(0, 365*3, size=n)]
-    magnitudes = np.round(rng.uniform(0.0, 5.0, size=n), 2)
-    dip_dirs = rng.uniform(0, 360, size=n)
-    dips = rng.uniform(0, 90, size=n)
-    return pd.DataFrame({
-        "time": dates,
-        "magnitude": magnitudes,
-        "dip_dir": dip_dirs,
-        "dip": dips
-    })
+def trend_plunge_to_vector(trend_deg, plunge_deg):
+    """
+    Convert trend/plunge (degrees) to unit vectors (east, north, up).
+    Plunge is positive down from horizontal.
+    """
+    t = np.radians(trend_deg)
+    p = np.radians(plunge_deg)
+    x = np.sin(t) * np.cos(p)
+    y = np.cos(t) * np.cos(p)
+    z = -np.sin(p)
+    return x, y, z
 
-df1 = make_sample_dataset(600, start_date=datetime(2021,1,1), seed=1)
-df2 = make_sample_dataset(400, start_date=datetime(2021,6,1), seed=2)
+def axial_mean_direction(trend_deg, plunge_deg):
+    """
+    Axial mean (directionless) using the orientation matrix eigenvector.
+    Returns a unit vector (east, north, up) forced to lower hemisphere (z <= 0).
+    """
+    x, y, z = trend_plunge_to_vector(trend_deg, plunge_deg)
+    v = np.vstack([x, y, z]).T
+    if v.size == 0:
+        return None
+    # orientation matrix
+    S = v.T @ v
+    vals, vecs = np.linalg.eigh(S)
+    mean_vec = vecs[:, np.argmax(vals)]
+    # force to lower hemisphere
+    if mean_vec[2] > 0:
+        mean_vec = -mean_vec
+    # normalize
+    norm = np.linalg.norm(mean_vec)
+    if norm == 0:
+        return None
+    return mean_vec / norm
+
+def orthonormalize_triad(v1, v2, v3):
+    """
+    Find the closest orthonormal triad to the three input vectors.
+    Returns (v1o, v2o, v3o) as unit vectors.
+    """
+    M = np.stack([v1, v2, v3], axis=1)
+    U, _, Vt = np.linalg.svd(M)
+    R = U @ Vt
+    if np.linalg.det(R) < 0:
+        U[:, -1] *= -1
+        R = U @ Vt
+    return R[:, 0], R[:, 1], R[:, 2]
+
+def force_lower_hemisphere(v):
+    if v is None:
+        return None
+    return -v if v[2] > 0 else v
+
+# -------------------------
+# Data load
+# -------------------------
+CSV_PATH = r"D:\Results\3438_N_Rosebery\Rosebery_SMTI_wModel.csv"
+
+LEFT_COLS = {
+    "p_trend": "P-Axis Trend (°)",
+    "p_plunge": "P-Axis Plunge (°)",
+    "t_trend": "T-Axis Trend (°)",
+    "t_plunge": "T-Axis Plunge (°)",
+    "b_trend": "B-Axis Trend (°)",
+    "b_plunge": "B-Axis Plunge (°)",
+}
+
+RIGHT_COLS = [
+    ("EDipDir1", "EDip1"),
+    ("EDipDir2", "EDip2"),
+    ("EDipDir3", "EDip3"),
+]
+
+def require_columns(df, cols):
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {', '.join(missing)}")
+
+def to_numeric_series(df, col):
+    return pd.to_numeric(df[col], errors="coerce")
+
+def load_dataset():
+    df = pd.read_csv(CSV_PATH)
+    require_columns(df, list(LEFT_COLS.values()))
+    for dipdir_col, dip_col in RIGHT_COLS:
+        require_columns(df, [dipdir_col, dip_col])
+    return df
+
+df = load_dataset()
 
 # -------------------------
 # Dash App
@@ -102,36 +168,15 @@ df2 = make_sample_dataset(400, start_date=datetime(2021,6,1), seed=2)
 app = dash.Dash(__name__)
 server = app.server
 
-min_time = min(df1.time.min(), df2.time.min())
-max_time = max(df1.time.max(), df2.time.max())
-min_mag = min(df1.magnitude.min(), df2.magnitude.min())
-max_mag = max(df1.magnitude.max(), df2.magnitude.max())
-
 app.layout = html.Div([
-    html.H3("Compare two dip/dir datasets on stereonets"),
+    html.H3("Rosebery SMTI stereonet comparison"),
     html.Div([
         html.Div([
             html.Label("Rotation (°)"),
             dcc.Slider(id='rotation', min=0, max=360, step=1, value=0,
                        marks={0:'0',90:'90',180:'180',270:'270',360:'360'}),
         ], style={'width':'48%', 'display':'inline-block', 'padding':'10px'}),
-        html.Div([
-            html.Label("Magnitude range"),
-            dcc.RangeSlider(id='mag_range', min=min_mag, max=max_mag, step=0.01,
-                            value=[min_mag, max_mag],
-                            marks={float(min_mag):str(min_mag), float(max_mag):str(max_mag)}),
-        ], style={'width':'48%', 'display':'inline-block', 'padding':'10px'}),
     ]),
-    html.Div([
-        html.Label("Time range"),
-        dcc.DatePickerRange(
-            id='date_range',
-            start_date=min_time.date(),
-            end_date=max_time.date(),
-            min_date_allowed=min_time.date(),
-            max_date_allowed=max_time.date(),
-        ),
-    ], style={'padding':'10px'}),
     dcc.Graph(id='stereo_graph', style={'height':'700px'}),
     html.Div(id='debug', style={'display':'none'})  # for debug prints if needed
 ])
@@ -139,25 +184,58 @@ app.layout = html.Div([
 @app.callback(
     Output('stereo_graph', 'figure'),
     Input('rotation', 'value'),
-    Input('mag_range', 'value'),
-    Input('date_range', 'start_date'),
-    Input('date_range', 'end_date'),
 )
-def update_figure(rotation, mag_range, start_date, end_date):
-    # Filter datasets
-    sdate = pd.to_datetime(start_date)
-    edate = pd.to_datetime(end_date) + pd.Timedelta(days=1)  # include end_date
-    d1 = df1[(df1.time >= sdate) & (df1.time < edate) & 
-            (df1.magnitude >= mag_range[0]) & (df1.magnitude <= mag_range[1])].copy()
-    d2 = df2[(df2.time >= sdate) & (df2.time < edate) & 
-            (df2.magnitude >= mag_range[0]) & (df2.magnitude <= mag_range[1])].copy()
+def update_figure(rotation):
+    # Prepare left dataset (P, T, B axes as lines)
+    p_trend = to_numeric_series(df, LEFT_COLS["p_trend"])
+    p_plunge = to_numeric_series(df, LEFT_COLS["p_plunge"])
+    t_trend = to_numeric_series(df, LEFT_COLS["t_trend"])
+    t_plunge = to_numeric_series(df, LEFT_COLS["t_plunge"])
+    b_trend = to_numeric_series(df, LEFT_COLS["b_trend"])
+    b_plunge = to_numeric_series(df, LEFT_COLS["b_plunge"])
 
-    # compute projections
-    x1, y1 = dipdir_array_to_xy(d1['dip_dir'].values, d1['dip'].values, rotation_deg=rotation)
-    x2, y2 = dipdir_array_to_xy(d2['dip_dir'].values, d2['dip'].values, rotation_deg=rotation)
+    p_mask = p_trend.notna() & p_plunge.notna()
+    t_mask = t_trend.notna() & t_plunge.notna()
+    b_mask = b_trend.notna() & b_plunge.notna()
+
+    x_p, y_p = equal_area_proj(p_trend[p_mask].to_numpy(), p_plunge[p_mask].to_numpy(), rotation_deg=rotation)
+    x_t, y_t = equal_area_proj(t_trend[t_mask].to_numpy(), t_plunge[t_mask].to_numpy(), rotation_deg=rotation)
+    x_b, y_b = equal_area_proj(b_trend[b_mask].to_numpy(), b_plunge[b_mask].to_numpy(), rotation_deg=rotation)
+
+    # Average P/T/B directions (axial) and orthonormalize
+    p_mean = axial_mean_direction(p_trend[p_mask].to_numpy(), p_plunge[p_mask].to_numpy())
+    t_mean = axial_mean_direction(t_trend[t_mask].to_numpy(), t_plunge[t_mask].to_numpy())
+    b_mean = axial_mean_direction(b_trend[b_mask].to_numpy(), b_plunge[b_mask].to_numpy())
+    p_avg = t_avg = b_avg = None
+    if p_mean is not None and t_mean is not None and b_mean is not None:
+        p_avg, t_avg, b_avg = orthonormalize_triad(p_mean, t_mean, b_mean)
+        p_avg = force_lower_hemisphere(p_avg)
+        t_avg = force_lower_hemisphere(t_avg)
+        b_avg = force_lower_hemisphere(b_avg)
+
+    # Prepare right dataset (three trend/plunge pairs per row)
+    right_sets = []
+    for dipdir_col, dip_col in RIGHT_COLS:
+        trend = to_numeric_series(df, dipdir_col)
+        plunge = to_numeric_series(df, dip_col)
+        mask = trend.notna() & plunge.notna()
+        if mask.any():
+            x, y = equal_area_proj(trend[mask].to_numpy(), plunge[mask].to_numpy(), rotation_deg=rotation)
+        else:
+            x, y = np.array([]), np.array([])
+        right_sets.append((dipdir_col, dip_col, trend, plunge, mask, x, y))
+
+    # Average E1/E2/E3 directions (axial) and orthonormalize
+    e_means = []
+    for dipdir_col, dip_col, trend, plunge, mask, _, _ in right_sets:
+        e_means.append(axial_mean_direction(trend[mask].to_numpy(), plunge[mask].to_numpy()))
+    e_avg = [None, None, None]
+    if all(v is not None for v in e_means):
+        e_avg[0], e_avg[1], e_avg[2] = orthonormalize_triad(e_means[0], e_means[1], e_means[2])
+        e_avg = [force_lower_hemisphere(v) for v in e_avg]
 
     # build two-panel figure
-    fig = make_subplots(rows=1, cols=2, subplot_titles=("Dataset 1", "Dataset 2"), horizontal_spacing=0.08)
+    fig = make_subplots(rows=1, cols=2, subplot_titles=("P/T/B Axes (Trends/Plunges)", "EDip Poles"), horizontal_spacing=0.08)
     # common background circle for stereonet
     circle_theta = np.linspace(0, 2*np.pi, 200)
     circle_x = np.sin(circle_theta)
@@ -178,21 +256,55 @@ def update_figure(rotation, mag_range, start_date, end_date):
         fig.add_trace(go.Scatter(x=x_line, y=y_line, mode='lines', line=dict(color='lightgray', width=1, dash='dot'), showlegend=False), row=1, col=1)
         fig.add_trace(go.Scatter(x=x_line, y=y_line, mode='lines', line=dict(color='lightgray', width=1, dash='dot'), showlegend=False), row=1, col=2)
 
-    # Dataset 1
+    # Left: P/T/B axes
     fig.add_trace(go.Scatter(x=circle_x, y=circle_y, mode='lines', line=dict(color='black'), showlegend=False), row=1, col=1)
-    fig.add_trace(go.Scatter(x=x1, y=y1, mode='markers', marker=dict(size=6, color='blue', opacity=0.7),
-                             name='D1'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x_p, y=y_p, mode='markers', marker=dict(size=6, color='#1f77b4', opacity=0.7),
+                             name='P-Axis'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x_t, y=y_t, mode='markers', marker=dict(size=6, color='#ff7f0e', opacity=0.7),
+                             name='T-Axis'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x_b, y=y_b, mode='markers', marker=dict(size=6, color='#2ca02c', opacity=0.7),
+                             name='B-Axis'), row=1, col=1)
 
-    # Dataset 2
+    # Right: EDip poles
     fig.add_trace(go.Scatter(x=circle_x, y=circle_y, mode='lines', line=dict(color='black'), showlegend=False), row=1, col=2)
-    fig.add_trace(go.Scatter(x=x2, y=y2, mode='markers', marker=dict(size=6, color='orange', opacity=0.7),
-                             name='D2'), row=1, col=2)
+    colors = ['#9467bd', '#8c564b', '#e377c2']
+    for idx, (dipdir_col, dip_col, _, _, _, x, y) in enumerate(right_sets, start=1):
+        label = f"E{idx}"
+        fig.add_trace(go.Scatter(x=x, y=y, mode='markers',
+                                 marker=dict(size=6, color=colors[idx-1], opacity=0.7),
+                                 name=label), row=1, col=2)
+
+    # Average markers (orthonormal triads)
+    if p_avg is not None and t_avg is not None and b_avg is not None:
+        p_tr, p_pl = vector_to_trend_plunge(*p_avg)
+        t_tr, t_pl = vector_to_trend_plunge(*t_avg)
+        b_tr, b_pl = vector_to_trend_plunge(*b_avg)
+        xp, yp = equal_area_proj(p_tr, p_pl, rotation_deg=rotation)
+        xt, yt = equal_area_proj(t_tr, t_pl, rotation_deg=rotation)
+        xb, yb = equal_area_proj(b_tr, b_pl, rotation_deg=rotation)
+        fig.add_trace(go.Scatter(x=[xp], y=[yp], mode='markers',
+                                 marker=dict(size=14, color='#1f77b4', symbol='star'),
+                                 name='P-Axis Avg'), row=1, col=1)
+        fig.add_trace(go.Scatter(x=[xt], y=[yt], mode='markers',
+                                 marker=dict(size=14, color='#ff7f0e', symbol='star'),
+                                 name='T-Axis Avg'), row=1, col=1)
+        fig.add_trace(go.Scatter(x=[xb], y=[yb], mode='markers',
+                                 marker=dict(size=14, color='#2ca02c', symbol='star'),
+                                 name='B-Axis Avg'), row=1, col=1)
+
+    if all(v is not None for v in e_avg):
+        for idx, v in enumerate(e_avg, start=1):
+            tr, pl = vector_to_trend_plunge(*v)
+            x, y = equal_area_proj(tr, pl, rotation_deg=rotation)
+            fig.add_trace(go.Scatter(x=[x], y=[y], mode='markers',
+                                     marker=dict(size=14, color=colors[idx-1], symbol='star'),
+                                     name=f"E{idx} Avg"), row=1, col=2)
 
     # layout cosmetics
     for i in (1,2):
         fig.update_xaxes(range=[-1.05,1.05], zeroline=False, showticklabels=False, row=1, col=i)
         fig.update_yaxes(range=[-1.05,1.05], zeroline=False, showticklabels=False, row=1, col=i)
-    fig.update_layout(height=700, margin=dict(l=40, r=40, t=80, b=40), showlegend=False)
+    fig.update_layout(height=700, margin=dict(l=40, r=40, t=80, b=40), showlegend=True)
 
     return fig
 
