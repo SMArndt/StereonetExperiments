@@ -163,6 +163,21 @@ def update_figure(rotation, mag_range, start_date, end_date):
     circle_x = np.sin(circle_theta)
     circle_y = np.cos(circle_theta)
 
+    # Add grid lines (concentric circles and radial lines)
+    grid_radii = np.linspace(0.2, 1.0, 5)
+    for r in grid_radii:
+        grid_x = r * np.sin(circle_theta)
+        grid_y = r * np.cos(circle_theta)
+        fig.add_trace(go.Scatter(x=grid_x, y=grid_y, mode='lines', line=dict(color='lightgray', width=1, dash='dot'), showlegend=False), row=1, col=1)
+        fig.add_trace(go.Scatter(x=grid_x, y=grid_y, mode='lines', line=dict(color='lightgray', width=1, dash='dot'), showlegend=False), row=1, col=2)
+
+    grid_angles = np.linspace(0, 2*np.pi, 12, endpoint=False)
+    for angle in grid_angles:
+        x_line = [0, np.sin(angle)]
+        y_line = [0, np.cos(angle)]
+        fig.add_trace(go.Scatter(x=x_line, y=y_line, mode='lines', line=dict(color='lightgray', width=1, dash='dot'), showlegend=False), row=1, col=1)
+        fig.add_trace(go.Scatter(x=x_line, y=y_line, mode='lines', line=dict(color='lightgray', width=1, dash='dot'), showlegend=False), row=1, col=2)
+
     # Dataset 1
     fig.add_trace(go.Scatter(x=circle_x, y=circle_y, mode='lines', line=dict(color='black'), showlegend=False), row=1, col=1)
     fig.add_trace(go.Scatter(x=x1, y=y1, mode='markers', marker=dict(size=6, color='blue', opacity=0.7),
