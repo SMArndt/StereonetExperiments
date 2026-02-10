@@ -443,6 +443,16 @@ LEFT_COLS = {
 }
 
 RIGHT_PREFIXES = ["E", "S"]
+RIGHT_MODE_LABELS = {
+    "E": "E (strain)",
+    "S": "S (stress)",
+    "E/S": "E/S (strain/stress)",
+}
+
+def right_mode_label(mode):
+    if not mode:
+        return RIGHT_MODE_LABELS["E/S"]
+    return RIGHT_MODE_LABELS.get(mode, mode)
 
 def require_columns(df, cols):
     missing = [c for c in cols if c not in df.columns]
@@ -522,7 +532,7 @@ app.layout = html.Div([
                 options=RIGHT_MODE_OPTIONS,
                 value=DEFAULT_RIGHT_MODE,
                 clearable=True,
-                placeholder="Upload a CSV to detect E/S",
+                placeholder="Upload a CSV to detect E (strain) / S (stress)",
             ),
             html.Label("Right Δ Trend (°)"),
             dcc.Slider(
@@ -601,7 +611,7 @@ def load_data(upload_contents, upload_filename):
         ctx["trend"],
         ctx["angle_deg"],
         ctx,
-        [{"label": m, "value": m} for m in modes],
+        [{"label": right_mode_label(m), "value": m} for m in modes],
         right_mode,
         title,
     )
@@ -814,10 +824,11 @@ def update_figure(right_trend_delta, right_plunge_delta, right_align_base, right
         e_avg_rot = [rotate_vector(v, right_rot) for v in e_avg]
 
     # build two-panel figure
+    right_title = right_mode_label(right_mode)
     fig = make_subplots(
         rows=1,
         cols=2,
-        subplot_titles=("P/T/B Axes (Trends/Plunges)", "E (Trends/Plunges)"),
+        subplot_titles=("P/T/B Axes (Trends/Plunges)", f"{right_title} (Trends/Plunges)"),
         horizontal_spacing=H_SPACING
     )
     # common background circle for stereonet
